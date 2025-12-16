@@ -1,4 +1,4 @@
-name: Build LanguageModel
+name: Build LanguageModel_review
 description: Uses nesy-factory builders to create an untrained model from a tokenizer and layer pattern; saves weights, config, model code, and a schema summary.
 
 inputs:
