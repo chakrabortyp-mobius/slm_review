@@ -150,6 +150,10 @@ implementation:
       - {inputValue: layer_pattern}
       - --model
       - {inputValue: model}
+      - --context_length
+      - {inputValue: context_length}
+      - --sliding_window
+      - {inputValue: sliding_window}
       - --model-weights
       - {outputPath: model_weights}
       - --model-config
