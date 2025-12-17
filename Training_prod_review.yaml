@@ -1,0 +1,346 @@
+name: LM Training_prod_review
+description: Tokenizes corpus to memmaps and trains a Gemma3-compatible model (Gemma or GPT-NeoX alias) with warmup→cosine LR, grad accumulation, and best/final checkpoints.
+
+inputs:
+  - name: tokenizer_json
+    type: Model
+  - name: train_corpus
+    type: Data
+  - name: model_config
+    type: Data
+  - name: model_weights
+    type: Model
+  - name: model_py_in
+    type: Data
+
+  # Hyperparameters
+  - name: learning_rate
+    type: String
+    default: "1e-4"
+  - name: min_lr
+    type: String
+    default: "1e-5"
+  - name: warmup_steps
+    type: Integer
+    default: "1000"
+  - name: max_iters
+    type: Integer
+    default: "150000"
+  - name: batch_size
+    type: Integer
+    default: "32"
+  - name: block_size
+    type: Integer
+    default: "128"
+  - name: grad_accum
+    type: Integer
+    default: "32"
+  - name: eval_interval
+    type: Integer
+    default: "1000"
+  - name: eval_iters
+    type: Integer
+    default: "500"
+  - name: weight_decay
+    type: String
+    default: "0.1"
+  - name: beta2
+    type: String
+    default: "0.95"
+  - name: clip_grad_norm
+    type: String
+    default: "0.5"
+  - name: val_fraction
+    type: String
+    default: "0.1"
+  - name: num_proc
+    type: Integer
+    default: "8"
+  - name: optimizer
+    type: String
+  - name: optimizer_kwargs
+    type: String
+
+outputs:
+  - name: best_weights
+    type: Model
+  - name: final_weights
+    type: Model
+  - name: training_report
+    type: Data
+  - name: loss_curve_csv
+    type: Data
+  - name: model_py
+    type: Data
+  - name: schema_json
+    type: String
+
+implementation:
+  container:
+    image: gurpreetgandhi/nesy-factory:v24
+    command:
+      - bash
+      - -eu
+      - -c
+      - |-
+        set -o pipefail
+
+        
+        echo "[DEBUG] shell received args: $*"
+
+        cat >/tmp/train_with_gemmatrainer.py <<'PY'
+        import argparse, json, os, shutil, sys
+        from pathlib import Path
+
+        DEFAULTS = {
+            "tokenizer_json": "/tmp/inputs/tokenizer_json/data",
+            "train_corpus":   "/tmp/inputs/train_corpus/data",
+            "model_config":   "/tmp/inputs/model_config/data",
+            "model_weights":  "/tmp/inputs/model_weights/data",
+            "model_py_in":    "/tmp/inputs/model_py_in/data",
+            "best_weights":   "/tmp/outputs/best_weights/data",
+            "final_weights":  "/tmp/outputs/final_weights/data",
+            "training_report":"/tmp/outputs/training_report/data",
+            "loss_curve_csv": "/tmp/outputs/loss_curve_csv/data",
+            "model_py_out":   "/tmp/outputs/model_py/data",
+            "schema_output":  "/tmp/outputs/schema_json/data",
+        }
+
+        def _pick_model_py(path_str: str) -> str:
+            p = Path(path_str)
+            if p.is_file():
+                return str(p)
+            if not p.exists():
+                raise FileNotFoundError(f"model_py_in not found: {p}")
+            for cand in p.iterdir():
+                if cand.suffix == ".py":
+                    return str(cand)
+            raise FileNotFoundError(f"No .py file under directory: {p}")
+
+        def _exist(p): return Path(p).exists()
+
+        def main():
+            print("[DEBUG] sys.argv:", sys.argv, flush=True)
+
+            ap = argparse.ArgumentParser()
+            # Make inputs OPTIONAL, then fallback to default KFP mount paths if missing.
+            ap.add_argument("--tokenizer-json", default=None)
+            ap.add_argument("--train-corpus",   default=None)
+            ap.add_argument("--model-config",   default=None)
+            ap.add_argument("--model-weights",  default=None)
+            ap.add_argument("--model-py-in",    default=None)
+            ap.add_argument("--model-py-out",   default=None)
+
+            ap.add_argument("--learning-rate", type=float, required=True)
+            ap.add_argument("--min-lr", type=float, required=True)
+            ap.add_argument("--warmup-steps", type=int, required=True)
+            ap.add_argument("--max-iters", type=int, required=True)
+            ap.add_argument("--batch-size", type=int, required=True)
+            ap.add_argument("--block-size", type=int, required=True)
+            ap.add_argument("--grad-accum", type=int, required=True)
+            ap.add_argument("--eval-interval", type=int, required=True)
+            ap.add_argument("--eval-iters", type=int, required=True)
+            ap.add_argument("--weight-decay", type=float, required=True)
+            ap.add_argument("--beta2", type=float, required=True)
+            ap.add_argument("--clip-grad-norm", type=float, required=True)
+            ap.add_argument("--val-fraction", type=float, required=True)
+            ap.add_argument("--num-proc", type=int, required=True)
+
+            ap.add_argument("--best-weights",   default=None)
+            ap.add_argument("--final-weights",  default=None)
+            ap.add_argument("--training-report",default=None)
+            ap.add_argument("--loss-curve-csv", default=None)
+            ap.add_argument("--schema-output",  default=None)
+            ap.add_argument("--optimizer", type=String, required=True)
+            ap.add_argument("--optimizer_kwargs", type=String, required=True)
+            args = ap.parse_args()
+
+            # Fallbacks for missing paths
+            for k in ("tokenizer_json","train_corpus","model_config","model_weights","model_py_in",
+                      "best_weights","final_weights","training_report","loss_curve_csv","model_py_out","schema_output"):
+                if getattr(args, k.replace("-", "_")) in (None, ""):
+                    setattr(args, k.replace("-", "_"), DEFAULTS[k])
+
+            print("[DEBUG] resolved paths:")
+            for k in ("tokenizer_json","train_corpus","model_config","model_weights","model_py_in",
+                      "best_weights","final_weights","training_report","loss_curve_csv","model_py_out","schema_output"):
+                v = getattr(args, k.replace("-", "_"))
+                print(f"  {k:16s} -> {v} (exists={_exist(v)})")
+
+            from nesy_factory.language_model.train import GemmaTrainer
+
+            # Ensure output dirs exist
+            for p in (args.best_weights, args.final_weights, args.training_report,
+                      args.loss_curve_csv, args.model_py_out, args.schema_output):
+                d = os.path.dirname(p)
+                if d:
+                    os.makedirs(d, exist_ok=True)
+
+            # Normalize/copy model code
+            src = args.model_py_in
+            dst = args.model_py_out
+
+            if os.path.isdir(dst) or dst.endswith("/data"):
+                os.makedirs(dst, exist_ok=True)
+                dst_file = os.path.join(dst, "model.py")
+            else:
+                os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+                dst_file = dst
+
+            try:
+                same = os.path.exists(src) and os.path.exists(dst_file) and os.path.samefile(src, dst_file)
+            except Exception:
+                same = os.path.abspath(src) == os.path.abspath(dst_file)
+            if same:
+                dst_file = os.path.join(os.path.dirname(dst_file), "model_copy.py")
+            
+            src_py = _pick_model_py(args.model_py_in)
+            shutil.copyfile(src_py, dst_file)
+
+            # Debug existence before invoking trainer
+            print("Pre-train existence checks:")
+            print(" - tokenizer_json:", _exist(args.tokenizer_json))
+            print(" - train_corpus  :", _exist(args.train_corpus))
+            print(" - model_config  :", _exist(args.model_config))
+            print(" - model_weights :", _exist(args.model_weights))
+            print(" - model_py_in   :", _exist(args.model_py_in))
+            print(" - model_py_out  :", _exist(args.model_py_out))
+
+            opt_kwargs = None
+            if args.optimizer_kwargs and args.optimizer_kwargs.strip():
+                opt_kwargs = json.loads(args.optimizer_kwargs)
+                if not isinstance(opt_kwargs, dict):
+                    raise ValueError("--optimizer_kwargs must be a JSON object, e.g. {'momentum': 0.9}")
+            
+            # Optional: convert betas list -> tuple for Adam/AdamW
+            if opt_kwargs and "betas" in opt_kwargs and isinstance(opt_kwargs["betas"], list):
+                opt_kwargs["betas"] = tuple(opt_kwargs["betas"])
+    
+            # Train
+            # Train
+            trainer = GemmaTrainer()
+            result = trainer.run(
+                tokenizer_json=args.tokenizer_json,
+                train_corpus=args.train_corpus,
+                model_config=args.model_config,
+                model_weights=args.model_weights,
+                model_py_in=src_py,
+                model_py_out=dst_file,
+                learning_rate=args.learning_rate,
+                min_lr=args.min_lr,
+                warmup_steps=args.warmup_steps,
+                max_iters=args.max_iters,
+                batch_size=args.batch_size,
+                block_size=args.block_size,
+                grad_accum=args.grad_accum,
+                eval_interval=args.eval_interval,
+                eval_iters=args.eval_iters,
+                weight_decay=args.weight_decay,
+                beta2=args.beta2,
+                clip_grad_norm=args.clip_grad_norm,
+                val_fraction=args.val_fraction,
+                num_proc=args.num_proc,
+                best_weights=args.best_weights,
+                final_weights=args.final_weights,
+                training_report=args.training_report,
+                loss_curve_csv=args.loss_curve_csv,
+                optimizer=args.optimizer,
+                optimizer_kwargs=opt_kwargs,,
+            )
+            
+            # Extract curves from trainer result
+            import csv
+            
+            schema_list = []
+            if os.path.exists(args.loss_curve_csv):
+                with open(args.loss_curve_csv, newline='', encoding='utf-8') as cf:
+                    rdr = csv.DictReader(cf)
+                    for row in rdr:
+                        try:
+                            epoch = int(row.get("update") or row.get("epoch") or len(schema_list) + 1)
+                            train_loss = float(row.get("train_loss") or row.get("loss") or 0)
+                            val_loss = float(row.get("val_loss") or row.get("validation_loss") or 0)
+                            schema_list.append({
+                                "epoch": epoch,
+                                "loss": train_loss,
+                                "validation_loss": val_loss
+                            })
+                        except Exception as e:
+                            print(f"[WARN] Skipped bad row: {row} ({e})")
+            
+            # Default file name if output path is a directory
+            schema_out = args.schema_output
+            if os.path.isdir(schema_out):
+                schema_out = os.path.join(schema_out, "schema.json")
+            
+            os.makedirs(os.path.dirname(schema_out) or ".", exist_ok=True)
+            
+            with open(schema_out, "w", encoding="utf-8") as f:
+                json.dump(schema_list, f, indent=2)
+            
+            print(f"[DONE] Schema JSON written with {len(schema_list)} entries → {schema_out}")
+
+        if __name__ == "__main__":
+            main()
+        PY
+
+        python3 -u /tmp/train_with_gemmatrainer.py "$@"
+      - _
+    args:
+      - --tokenizer-json
+      - {inputPath: tokenizer_json}
+      - --train-corpus
+      - {inputPath: train_corpus}
+      - --model-config
+      - {inputPath: model_config}
+      - --model-weights
+      - {inputPath: model_weights}
+      - --model-py-in
+      - {inputPath: model_py_in}
+
+      - --learning-rate
+      - {inputValue: learning_rate}
+      - --min-lr
+      - {inputValue: min_lr}
+      - --warmup-steps
+      - {inputValue: warmup_steps}
+      - --max-iters
+      - {inputValue: max_iters}
+      - --batch-size
+      - {inputValue: batch_size}
+      - --block-size
+      - {inputValue: block_size}
+      - --grad-accum
+      - {inputValue: grad_accum}
+      - --eval-interval
+      - {inputValue: eval_interval}
+      - --eval-iters
+      - {inputValue: eval_iters}
+      - --weight-decay
+      - {inputValue: weight_decay}
+      - --beta2
+      - {inputValue: beta2}
+      - --clip-grad-norm
+      - {inputValue: clip_grad_norm}
+      - --val-fraction
+      - {inputValue: val_fraction}
+      - --num-proc
+      - {inputValue: num_proc}
+
+      - --optimizer
+      - {inputValue: optimizer}
+      - --num-proc
+      - {inputValue: optimizer_kwargs}
+
+      - --best-weights
+      - {outputPath: best_weights}
+      - --final-weights
+      - {outputPath: final_weights}
+      - --training-report
+      - {outputPath: training_report}
+      - --loss-curve-csv
+      - {outputPath: loss_curve_csv}
+      - --model-py-out
+      - {outputPath: model_py}
+      - --schema-output
+      - {outputPath: schema_json}
