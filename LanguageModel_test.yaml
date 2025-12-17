@@ -49,6 +49,18 @@ implementation:
 
         cat >/tmp/build_model.py <<'PY'
         import argparse, json, os, sys
+        # =====================================================
+        # BLOCK TORCHVISION (circular import fix)
+        # =====================================================
+        original_import = __builtins__.__import__
+        def block_torchvision(name, *args, **kwargs):
+            if "torchvision" in name:
+                import types
+                dummy = types.ModuleType(name)
+                sys.modules[name] = dummy
+                return dummy
+            return original_import(name, *args, **kwargs)
+        __builtins__.__import__ = block_torchvision
 
         def main():
           ap = argparse.ArgumentParser()
