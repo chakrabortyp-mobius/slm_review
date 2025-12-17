@@ -218,11 +218,11 @@ implementation:
             print(" - model_py_in   :", _exist(args.model_py_in))
             print(" - model_py_out  :", _exist(args.model_py_out))
 
-            opt_kwargs = None
-            if args.optimizer_kwargs and args.optimizer_kwargs.strip():
-                opt_kwargs = json.loads(args.optimizer_kwargs)
-                if not isinstance(opt_kwargs, dict):
-                    raise ValueError("--optimizer_kwargs must be a JSON object, e.g. {'momentum': 0.9}")
+            # opt_kwargs = None
+            # if args.optimizer_kwargs and args.optimizer_kwargs.strip():
+            #     opt_kwargs = json.loads(args.optimizer_kwargs)
+            #     if not isinstance(opt_kwargs, dict):
+            #         raise ValueError("--optimizer_kwargs must be a JSON object, e.g. {'momentum': 0.9}")
             
             # Optional: convert betas list -> tuple for Adam/AdamW
             # if opt_kwargs and "betas" in opt_kwargs and isinstance(opt_kwargs["betas"], list):
@@ -257,7 +257,7 @@ implementation:
                 training_report=args.training_report,
                 loss_curve_csv=args.loss_curve_csv,
                 optimizer=args.optimizer,
-                optimizer_kwargs=opt_kwargs,,
+                optimizer_kwargs=args.optimizer_kwargs,,
             )
             
             # Extract curves from trainer result
