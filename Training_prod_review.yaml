@@ -77,7 +77,7 @@ outputs:
 
 implementation:
   container:
-    image: gurpreetgandhi/nesy-factory:v24
+    image: deepak0147/nessy-facotry:0.0.2
     command:
       - bash
       - -eu
@@ -91,6 +91,18 @@ implementation:
         cat >/tmp/train_with_gemmatrainer.py <<'PY'
         import argparse, json, os, shutil, sys
         from pathlib import Path
+        # =====================================================
+        # BLOCK TORCHVISION (circular import fix)
+        # =====================================================
+        original_import = __builtins__.__import__
+        def block_torchvision(name, *args, **kwargs):
+            if "torchvision" in name:
+                import types
+                dummy = types.ModuleType(name)
+                sys.modules[name] = dummy
+                return dummy
+            return original_import(name, *args, **kwargs)
+        __builtins__.__import__ = block_torchvision
 
         DEFAULTS = {
             "tokenizer_json": "/tmp/inputs/tokenizer_json/data",
