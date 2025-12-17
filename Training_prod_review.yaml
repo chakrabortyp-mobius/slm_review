@@ -163,8 +163,8 @@ implementation:
             ap.add_argument("--training-report",default=None)
             ap.add_argument("--loss-curve-csv", default=None)
             ap.add_argument("--schema-output",  default=None)
-            ap.add_argument("--optimizer", type=String, required=True)
-            ap.add_argument("--optimizer_kwargs", type=String, required=True)
+            ap.add_argument("--optimizer", required=True)
+            ap.add_argument("--optimizer_kwargs", required=True)
             args = ap.parse_args()
 
             # Fallbacks for missing paths
@@ -225,8 +225,8 @@ implementation:
                     raise ValueError("--optimizer_kwargs must be a JSON object, e.g. {'momentum': 0.9}")
             
             # Optional: convert betas list -> tuple for Adam/AdamW
-            if opt_kwargs and "betas" in opt_kwargs and isinstance(opt_kwargs["betas"], list):
-                opt_kwargs["betas"] = tuple(opt_kwargs["betas"])
+            # if opt_kwargs and "betas" in opt_kwargs and isinstance(opt_kwargs["betas"], list):
+            #     opt_kwargs["betas"] = tuple(opt_kwargs["betas"])
     
             # Train
             # Train
