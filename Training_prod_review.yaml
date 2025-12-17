@@ -341,7 +341,7 @@ implementation:
 
       - --optimizer
       - {inputValue: optimizer}
-      - --num-proc
+      - --optimizer_kwargs
       - {inputValue: optimizer_kwargs}
 
       - --best-weights
