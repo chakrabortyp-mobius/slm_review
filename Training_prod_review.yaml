@@ -257,7 +257,7 @@ implementation:
                 training_report=args.training_report,
                 loss_curve_csv=args.loss_curve_csv,
                 optimizer=args.optimizer,
-                optimizer_kwargs=args.optimizer_kwargs,,
+                optimizer_kwargs=args.optimizer_kwargs
             )
             
             # Extract curves from trainer result
