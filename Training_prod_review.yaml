@@ -94,15 +94,39 @@ implementation:
         # =====================================================
         # BLOCK TORCHVISION (circular import fix)
         # =====================================================
+        # original_import = __builtins__.__import__
+        # def block_torchvision(name, *args, **kwargs):
+        #     if "torchvision" in name:
+        #         import types
+        #         dummy = types.ModuleType(name)
+        #         sys.modules[name] = dummy
+        #         return dummy
+        #     return original_import(name, *args, **kwargs)
+        # __builtins__.__import__ = block_torchvision
+        # import importlib.machinery, types
+
         original_import = __builtins__.__import__
+
         def block_torchvision(name, *args, **kwargs):
-            if "torchvision" in name:
-                import types
-                dummy = types.ModuleType(name)
-                sys.modules[name] = dummy
-                return dummy
+            if name == "torchvision" or name.startswith("torchvision."):
+                # create a dummy torchvision package with non-None __spec__
+                if "torchvision" not in sys.modules:
+                    pkg = types.ModuleType("torchvision")
+                    pkg.__spec__ = importlib.machinery.ModuleSpec("torchvision", loader=None, is_package=True)
+                    pkg.__path__ = []
+                    sys.modules["torchvision"] = pkg
+        
+                # create/return dummy submodules with non-None __spec__
+                if name not in sys.modules:
+                    mod = types.ModuleType(name)
+                    mod.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
+                    sys.modules[name] = mod
+                return sys.modules[name]
+        
             return original_import(name, *args, **kwargs)
+        
         __builtins__.__import__ = block_torchvision
+
 
         DEFAULTS = {
             "tokenizer_json": "/tmp/inputs/tokenizer_json/data",
