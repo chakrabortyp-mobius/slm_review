@@ -84,49 +84,51 @@ implementation:
       - -c
       - |-
         set -o pipefail
-
-        
         echo "[DEBUG] shell received args: $*"
 
         cat >/tmp/train_with_gemmatrainer.py <<'PY'
         import argparse, json, os, shutil, sys
         from pathlib import Path
-        # =====================================================
-        # BLOCK TORCHVISION (circular import fix)
-        # =====================================================
-        # original_import = __builtins__.__import__
-        # def block_torchvision(name, *args, **kwargs):
-        #     if "torchvision" in name:
-        #         import types
-        #         dummy = types.ModuleType(name)
-        #         sys.modules[name] = dummy
-        #         return dummy
-        #     return original_import(name, *args, **kwargs)
-        # __builtins__.__import__ = block_torchvision
-        # import importlib.machinery, types
+        import types
+        import importlib.machinery
 
+        # =====================================================
+        # BLOCK OPTIONAL IMAGE STACK (avoid torchvision/CNN imports)
+        # =====================================================
+        # Prevent nesy_factory/__init__.py from importing CNNs (which imports torchvision).
+        sys.modules.setdefault("nesy_factory.CNNs", types.ModuleType("nesy_factory.CNNs"))
+        # If your build also imports GANs and it triggers torchvision, uncomment:
+        # sys.modules.setdefault("nesy_factory.GANs", types.ModuleType("nesy_factory.GANs"))
+
+        # =====================================================
+        # BLOCK TORCHVISION (ensure find_spec doesn't crash)
+        # =====================================================
         original_import = __builtins__.__import__
+
+        def _ensure_pkg(name: str, is_package: bool):
+            if name in sys.modules:
+                m = sys.modules[name]
+                if getattr(m, "__spec__", None) is None:
+                    m.__spec__ = importlib.machinery.ModuleSpec(name, loader=None, is_package=is_package)
+                    if is_package and not hasattr(m, "__path__"):
+                        m.__path__ = []
+                return m
+            m = types.ModuleType(name)
+            m.__spec__ = importlib.machinery.ModuleSpec(name, loader=None, is_package=is_package)
+            if is_package:
+                m.__path__ = []
+            sys.modules[name] = m
+            return m
 
         def block_torchvision(name, *args, **kwargs):
             if name == "torchvision" or name.startswith("torchvision."):
-                # create a dummy torchvision package with non-None __spec__
-                if "torchvision" not in sys.modules:
-                    pkg = types.ModuleType("torchvision")
-                    pkg.__spec__ = importlib.machinery.ModuleSpec("torchvision", loader=None, is_package=True)
-                    pkg.__path__ = []
-                    sys.modules["torchvision"] = pkg
-        
-                # create/return dummy submodules with non-None __spec__
-                if name not in sys.modules:
-                    mod = types.ModuleType(name)
-                    mod.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
-                    sys.modules[name] = mod
+                _ensure_pkg("torchvision", is_package=True)
+                if name != "torchvision":
+                    _ensure_pkg(name, is_package=False)
                 return sys.modules[name]
-        
             return original_import(name, *args, **kwargs)
-        
-        __builtins__.__import__ = block_torchvision
 
+        __builtins__.__import__ = block_torchvision
 
         DEFAULTS = {
             "tokenizer_json": "/tmp/inputs/tokenizer_json/data",
@@ -159,7 +161,6 @@ implementation:
             print("[DEBUG] sys.argv:", sys.argv, flush=True)
 
             ap = argparse.ArgumentParser()
-            # Make inputs OPTIONAL, then fallback to default KFP mount paths if missing.
             ap.add_argument("--tokenizer-json", default=None)
             ap.add_argument("--train-corpus",   default=None)
             ap.add_argument("--model-config",   default=None)
@@ -194,8 +195,9 @@ implementation:
             # Fallbacks for missing paths
             for k in ("tokenizer_json","train_corpus","model_config","model_weights","model_py_in",
                       "best_weights","final_weights","training_report","loss_curve_csv","model_py_out","schema_output"):
-                if getattr(args, k.replace("-", "_")) in (None, ""):
-                    setattr(args, k.replace("-", "_"), DEFAULTS[k])
+                attr = k.replace("-", "_")
+                if getattr(args, attr) in (None, ""):
+                    setattr(args, attr, DEFAULTS[k])
 
             print("[DEBUG] resolved paths:")
             for k in ("tokenizer_json","train_corpus","model_config","model_weights","model_py_in",
@@ -213,9 +215,7 @@ implementation:
                     os.makedirs(d, exist_ok=True)
 
             # Normalize/copy model code
-            src = args.model_py_in
             dst = args.model_py_out
-
             if os.path.isdir(dst) or dst.endswith("/data"):
                 os.makedirs(dst, exist_ok=True)
                 dst_file = os.path.join(dst, "model.py")
@@ -223,39 +223,18 @@ implementation:
                 os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
                 dst_file = dst
 
+            src_py = _pick_model_py(args.model_py_in)
             try:
-                same = os.path.exists(src) and os.path.exists(dst_file) and os.path.samefile(src, dst_file)
+                same = os.path.exists(src_py) and os.path.exists(dst_file) and os.path.samefile(src_py, dst_file)
             except Exception:
-                same = os.path.abspath(src) == os.path.abspath(dst_file)
+                same = os.path.abspath(src_py) == os.path.abspath(dst_file)
             if same:
                 dst_file = os.path.join(os.path.dirname(dst_file), "model_copy.py")
-            
-            src_py = _pick_model_py(args.model_py_in)
+
             shutil.copyfile(src_py, dst_file)
 
-            # Debug existence before invoking trainer
-            print("Pre-train existence checks:")
-            print(" - tokenizer_json:", _exist(args.tokenizer_json))
-            print(" - train_corpus  :", _exist(args.train_corpus))
-            print(" - model_config  :", _exist(args.model_config))
-            print(" - model_weights :", _exist(args.model_weights))
-            print(" - model_py_in   :", _exist(args.model_py_in))
-            print(" - model_py_out  :", _exist(args.model_py_out))
-
-            # opt_kwargs = None
-            # if args.optimizer_kwargs and args.optimizer_kwargs.strip():
-            #     opt_kwargs = json.loads(args.optimizer_kwargs)
-            #     if not isinstance(opt_kwargs, dict):
-            #         raise ValueError("--optimizer_kwargs must be a JSON object, e.g. {'momentum': 0.9}")
-            
-            # Optional: convert betas list -> tuple for Adam/AdamW
-            # if opt_kwargs and "betas" in opt_kwargs and isinstance(opt_kwargs["betas"], list):
-            #     opt_kwargs["betas"] = tuple(opt_kwargs["betas"])
-    
-            # Train
-            # Train
             trainer = GemmaTrainer()
-            result = trainer.run(
+            _ = trainer.run(
                 tokenizer_json=args.tokenizer_json,
                 train_corpus=args.train_corpus,
                 model_config=args.model_config,
@@ -283,10 +262,8 @@ implementation:
                 optimizer=args.optimizer,
                 optimizer_kwargs=args.optimizer_kwargs
             )
-            
-            # Extract curves from trainer result
+
             import csv
-            
             schema_list = []
             if os.path.exists(args.loss_curve_csv):
                 with open(args.loss_curve_csv, newline='', encoding='utf-8') as cf:
@@ -296,24 +273,17 @@ implementation:
                             epoch = int(row.get("update") or row.get("epoch") or len(schema_list) + 1)
                             train_loss = float(row.get("train_loss") or row.get("loss") or 0)
                             val_loss = float(row.get("val_loss") or row.get("validation_loss") or 0)
-                            schema_list.append({
-                                "epoch": epoch,
-                                "loss": train_loss,
-                                "validation_loss": val_loss
-                            })
+                            schema_list.append({"epoch": epoch, "loss": train_loss, "validation_loss": val_loss})
                         except Exception as e:
                             print(f"[WARN] Skipped bad row: {row} ({e})")
-            
-            # Default file name if output path is a directory
+
             schema_out = args.schema_output
             if os.path.isdir(schema_out):
                 schema_out = os.path.join(schema_out, "schema.json")
-            
             os.makedirs(os.path.dirname(schema_out) or ".", exist_ok=True)
-            
             with open(schema_out, "w", encoding="utf-8") as f:
                 json.dump(schema_list, f, indent=2)
-            
+
             print(f"[DONE] Schema JSON written with {len(schema_list)} entries → {schema_out}")
 
         if __name__ == "__main__":
