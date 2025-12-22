@@ -77,7 +77,7 @@ outputs:
 
 implementation:
   container:
-    image: deepak0147/nessy-facotry:0.0.2
+    image: deepak0147/nessy-facotry:0.0.4
     command:
       - bash
       - -eu
