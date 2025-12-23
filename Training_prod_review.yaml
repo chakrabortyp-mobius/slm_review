@@ -173,6 +173,39 @@ implementation:
 
         def _exist(p): return Path(p).exists()
 
+        # =====================================================
+        # REQUIRED FIX: parse optimizer_kwargs string -> dict
+        # =====================================================
+        def _parse_optimizer_kwargs(raw: str) -> dict:
+            """
+            Accepts JSON object strings like:
+              {"betas":[0.9,0.95],"eps":1e-8}
+            Also handles escaped JSON strings like:
+              '{\\"betas\\":[0.9,0.95],\\"eps\\":1e-8}'
+            """
+            if raw is None:
+                return {}
+            s = raw.strip()
+            if not s:
+                return {}
+            try:
+                obj = json.loads(s)
+            except Exception:
+                # handle strings that contain backslash-escaped quotes
+                try:
+                    obj = json.loads(s.encode("utf-8").decode("unicode_escape"))
+                except Exception as e:
+                    raise ValueError(
+                        f"Invalid --optimizer_kwargs. Expected JSON object string, got: {raw!r}"
+                    ) from e
+            if obj is None:
+                return {}
+            if not isinstance(obj, dict):
+                raise ValueError(
+                    f"Invalid --optimizer_kwargs. Expected JSON object (dict), got {type(obj).__name__}: {obj!r}"
+                )
+            return obj
+
         def main():
             print("[DEBUG] sys.argv:", sys.argv, flush=True)
 
@@ -246,6 +279,9 @@ implementation:
 
             shutil.copyfile(src_py, dst_file)
 
+            # REQUIRED FIX APPLIED HERE
+            optimizer_kwargs = _parse_optimizer_kwargs(args.optimizer_kwargs)
+
             trainer = GemmaTrainer()
             _ = trainer.run(
                 tokenizer_json=args.tokenizer_json,
@@ -273,7 +309,7 @@ implementation:
                 training_report=args.training_report,
                 loss_curve_csv=args.loss_curve_csv,
                 optimizer=args.optimizer,
-                optimizer_kwargs=args.optimizer_kwargs
+                optimizer_kwargs=optimizer_kwargs
             )
 
             import csv
