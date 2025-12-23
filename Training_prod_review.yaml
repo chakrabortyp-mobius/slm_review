@@ -177,12 +177,6 @@ implementation:
         # REQUIRED FIX: parse optimizer_kwargs string -> dict
         # =====================================================
         def _parse_optimizer_kwargs(raw: str) -> dict:
-            """
-            Accepts JSON object strings like:
-              {"betas":[0.9,0.95],"eps":1e-8}
-            Also handles escaped JSON strings like:
-              '{\\"betas\\":[0.9,0.95],\\"eps\\":1e-8}'
-            """
             if raw is None:
                 return {}
             s = raw.strip()
